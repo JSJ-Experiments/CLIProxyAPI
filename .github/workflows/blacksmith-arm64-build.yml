@@ -39,7 +39,7 @@ jobs:
             -ldflags="-s -w -X main.Version=$VERSION -X main.Commit=$COMMIT -X main.BuildDate=$BUILD_DATE" \
             -o dist/cli-proxy-api ./cmd/server/
           chmod 0755 dist/cli-proxy-api
-          sha256sum dist/cli-proxy-api > dist/cli-proxy-api.sha256
+          (cd dist && sha256sum cli-proxy-api > cli-proxy-api.sha256)
           {
             echo "version=$VERSION"
             echo "commit=$COMMIT"
