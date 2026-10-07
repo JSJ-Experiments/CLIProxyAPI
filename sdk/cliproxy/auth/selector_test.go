@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -36,6 +37,111 @@ func TestFillFirstSelectorPick_Deterministic(t *testing.T) {
 	}
 	if got.ID != "a" {
 		t.Fatalf("Pick() auth.ID = %q, want %q", got.ID, "a")
+	}
+}
+
+func TestResetAwareSelectorPrefersNearestReset(t *testing.T) {
+	now := time.Now()
+	selector := &ResetAwareSelector{}
+	auths := []*Auth{
+		{
+			ID:       "claude-c",
+			Provider: "claude",
+			Status:   StatusActive,
+			Quota: QuotaState{ObservedAt: now, Signals: map[string]string{
+				"Anthropic-Ratelimit-Unified-7d-Reset":       strconv.FormatInt(now.Add(5*24*time.Hour).Unix(), 10),
+				"Anthropic-Ratelimit-Unified-7d-Utilization": "0.10",
+			}},
+		},
+		{
+			ID:       "claude-a",
+			Provider: "claude",
+			Status:   StatusActive,
+			Quota: QuotaState{ObservedAt: now, Signals: map[string]string{
+				"Anthropic-Ratelimit-Unified-7d-Reset":       strconv.FormatInt(now.Add(10*time.Hour).Unix(), 10),
+				"Anthropic-Ratelimit-Unified-7d-Utilization": "0.30",
+			}},
+		},
+		{
+			ID:       "claude-b",
+			Provider: "claude",
+			Status:   StatusActive,
+			Quota: QuotaState{ObservedAt: now, Signals: map[string]string{
+				"Anthropic-Ratelimit-Unified-7d-Reset":       strconv.FormatInt(now.Add(3*24*time.Hour).Unix(), 10),
+				"Anthropic-Ratelimit-Unified-7d-Utilization": "0.20",
+			}},
+		},
+	}
+
+	got, err := selector.Pick(context.Background(), "claude", "claude-test", cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got == nil || got.ID != "claude-a" {
+		t.Fatalf("Pick() auth = %#v, want claude-a", got)
+	}
+}
+
+func TestResetAwareSelectorSamplesUnknownQuotaBeforeKnown(t *testing.T) {
+	now := time.Now()
+	selector := &ResetAwareSelector{}
+	auths := []*Auth{
+		{
+			ID:       "codex-known",
+			Provider: "codex",
+			Status:   StatusActive,
+			Quota: QuotaState{ObservedAt: now, Signals: map[string]string{
+				"X-Codex-Primary-Reset-At": strconv.FormatInt(now.Add(time.Hour).Unix(), 10),
+			}},
+		},
+		{ID: "codex-unknown-a", Provider: "codex", Status: StatusActive},
+		{ID: "codex-unknown-b", Provider: "codex", Status: StatusActive},
+	}
+
+	got1, err := selector.Pick(context.Background(), "codex", "gpt-test", cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatalf("first Pick() error = %v", err)
+	}
+	got2, err := selector.Pick(context.Background(), "codex", "gpt-test", cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatalf("second Pick() error = %v", err)
+	}
+	if got1 == nil || got2 == nil || got1.ID == "codex-known" || got2.ID == "codex-known" || got1.ID == got2.ID {
+		t.Fatalf("unknown sampling picks = %#v, %#v; want the two unknown credentials", got1, got2)
+	}
+}
+
+func TestResetAwareSelectorSameResetBurnsMoreRemaining(t *testing.T) {
+	now := time.Now()
+	reset := strconv.FormatInt(now.Add(2*time.Hour).Unix(), 10)
+	selector := &ResetAwareSelector{}
+	auths := []*Auth{
+		{
+			ID:       "codex-30-left",
+			Provider: "codex",
+			Status:   StatusActive,
+			Quota: QuotaState{ObservedAt: now, Signals: map[string]string{
+				"X-Codex-Primary-Reset-At":     reset,
+				"X-Codex-Primary-Used-Percent": "70",
+			}},
+		},
+		{
+			ID:       "codex-80-left",
+			Provider: "codex",
+			Status:   StatusActive,
+			Quota: QuotaState{ObservedAt: now, Signals: map[string]string{
+				"X-Codex-Primary-Reset-At":     reset,
+				"X-Codex-Primary-Used-Percent": "20",
+			}},
+		},
+	}
+
+	got, err := selector.Pick(context.Background(), "codex", "gpt-test", cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got == nil || got.ID != "codex-80-left" {
+		t.Fatalf("Pick() auth = %#v, want codex-80-left", got)
 	}
 }
 

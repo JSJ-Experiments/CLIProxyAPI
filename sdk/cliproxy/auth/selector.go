@@ -71,6 +71,19 @@ func weightedSelectorStateModel(ctx context.Context, availabilityModel string) s
 // rolling-window subscription caps (e.g. chat message limits).
 type FillFirstSelector struct{}
 
+// ResetAwareSelector prefers the credential whose observed quota window resets
+// soonest, so quota that expires first is consumed before later-resetting
+// accounts. Credentials without a usable quota observation are sampled first
+// (round-robin) for providers that expose passive quota watermarks, allowing
+// the selector to learn the pool before settling into reset order.
+//
+// Session affinity is intentionally implemented outside this selector. When
+// wrapped by SessionAffinitySelector, an existing session binding wins and
+// reset-aware ordering is only consulted for cold bindings or failover.
+type ResetAwareSelector struct {
+	unknown RoundRobinSelector
+}
+
 type blockReason int
 
 const (
@@ -818,6 +831,174 @@ func (s *FillFirstSelector) Pick(ctx context.Context, provider, model string, op
 	}
 	available = preferCodexWebsocketAuths(ctx, provider, available)
 	return available[0], nil
+}
+
+// Pick selects the available auth with the nearest observed future quota reset.
+func (s *ResetAwareSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
+	now := time.Now()
+	available, err := getSelectorAvailableAuths(ctx, auths, provider, model, now)
+	if err != nil {
+		return nil, err
+	}
+	available = preferCodexWebsocketAuths(ctx, provider, available)
+	if len(available) == 0 {
+		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
+	}
+
+	unknown := make([]*Auth, 0, len(available))
+	known := make([]*Auth, 0, len(available))
+	for _, candidate := range available {
+		if _, _, ok := resetAwareQuotaRank(candidate, now); ok {
+			known = append(known, candidate)
+			continue
+		}
+		if candidate != nil && ProviderSupportsQuotaObservation(candidate.Provider) {
+			unknown = append(unknown, candidate)
+		}
+	}
+
+	// Probe unseen/stale observable credentials before committing to a reset
+	// ordering. This is bounded in practice because a successful Claude/Codex
+	// request replaces the auth's quota observation snapshot.
+	if len(unknown) > 0 {
+		return s.unknown.Pick(ctx, provider, model, opts, unknown)
+	}
+
+	if len(known) == 0 {
+		// Providers without passive quota observations retain deterministic
+		// fill-first behavior rather than being spread unexpectedly.
+		return available[0], nil
+	}
+
+	sort.SliceStable(known, func(i, j int) bool {
+		resetI, remainingI, _ := resetAwareQuotaRank(known[i], now)
+		resetJ, remainingJ, _ := resetAwareQuotaRank(known[j], now)
+		if !resetI.Equal(resetJ) {
+			return resetI.Before(resetJ)
+		}
+		// At the same expiry, burn the account with more quota left first.
+		if remainingI != remainingJ {
+			return remainingI > remainingJ
+		}
+		return known[i].ID < known[j].ID
+	})
+	return known[0], nil
+}
+
+// resetAwareQuotaRank returns the nearest observed future quota reset and the
+// remaining percentage for that same window when available.
+func resetAwareQuotaRank(auth *Auth, now time.Time) (time.Time, float64, bool) {
+	if auth == nil || len(auth.Quota.Signals) == 0 {
+		return time.Time{}, -1, false
+	}
+	observedAt := auth.Quota.ObservedAt
+	if observedAt.IsZero() {
+		observedAt = now
+	}
+
+	signals := make(map[string]string, len(auth.Quota.Signals))
+	for key, value := range auth.Quota.Signals {
+		signals[strings.ToLower(strings.TrimSpace(key))] = strings.TrimSpace(value)
+	}
+
+	var bestReset time.Time
+	bestRemaining := -1.0
+	for key, value := range signals {
+		var resetAt time.Time
+		var prefix string
+		switch {
+		case strings.HasSuffix(key, "-reset-after-seconds"):
+			seconds, errParse := strconv.ParseFloat(value, 64)
+			if errParse != nil || seconds <= 0 {
+				continue
+			}
+			resetAt = observedAt.Add(time.Duration(seconds * float64(time.Second)))
+			prefix = strings.TrimSuffix(key, "-reset-after-seconds")
+		case strings.HasSuffix(key, "-reset-at"):
+			var ok bool
+			resetAt, ok = parseObservedResetTime(value)
+			if !ok {
+				continue
+			}
+			prefix = strings.TrimSuffix(key, "-reset-at")
+		case strings.HasPrefix(key, "anthropic-ratelimit-unified-") && strings.HasSuffix(key, "-reset"):
+			var ok bool
+			resetAt, ok = parseObservedResetTime(value)
+			if !ok {
+				continue
+			}
+			prefix = strings.TrimSuffix(key, "-reset")
+		default:
+			continue
+		}
+		if !resetAt.After(now) {
+			continue
+		}
+
+		remaining := resetAwareRemainingPercent(signals, prefix)
+		if bestReset.IsZero() || resetAt.Before(bestReset) ||
+			(resetAt.Equal(bestReset) && remaining > bestRemaining) {
+			bestReset = resetAt
+			bestRemaining = remaining
+		}
+	}
+	if bestReset.IsZero() {
+		return time.Time{}, -1, false
+	}
+	return bestReset, bestRemaining, true
+}
+
+func parseObservedResetTime(raw string) (time.Time, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Time{}, false
+	}
+	if number, errParse := strconv.ParseFloat(raw, 64); errParse == nil && number > 0 {
+		// Be lenient with millisecond Unix timestamps.
+		if number > 1e12 {
+			number /= 1000
+		}
+		seconds := int64(number)
+		nanos := int64((number - float64(seconds)) * float64(time.Second))
+		return time.Unix(seconds, nanos), true
+	}
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
+		if parsed, errParse := time.Parse(layout, raw); errParse == nil {
+			return parsed, true
+		}
+	}
+	return time.Time{}, false
+}
+
+func resetAwareRemainingPercent(signals map[string]string, prefix string) float64 {
+	if usedRaw := signals[prefix+"-used-percent"]; usedRaw != "" {
+		if used, errParse := strconv.ParseFloat(usedRaw, 64); errParse == nil {
+			remaining := 100 - used
+			if remaining < 0 {
+				return 0
+			}
+			if remaining > 100 {
+				return 100
+			}
+			return remaining
+		}
+	}
+	if utilizationRaw := signals[prefix+"-utilization"]; utilizationRaw != "" {
+		if utilization, errParse := strconv.ParseFloat(utilizationRaw, 64); errParse == nil {
+			if utilization <= 1 {
+				utilization *= 100
+			}
+			remaining := 100 - utilization
+			if remaining < 0 {
+				return 0
+			}
+			if remaining > 100 {
+				return 100
+			}
+			return remaining
+		}
+	}
+	return -1
 }
 
 func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, blockReason, time.Time) {
