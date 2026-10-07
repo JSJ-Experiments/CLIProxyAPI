@@ -1,0 +1,55 @@
+name: Blacksmith ARM64 build
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: blacksmith-8vcpu-ubuntu-2404-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Download and verify dependencies
+        run: go mod download && go mod verify
+
+      - name: Test
+        run: go test ./...
+
+      - name: Build native Linux ARM64 binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          VERSION="$(git describe --tags --always --dirty | sed 's/^v//')"
+          COMMIT="$(git rev-parse --short=12 HEAD)"
+          BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          CGO_ENABLED=1 go build -buildvcs=false \
+            -ldflags="-s -w -X main.Version=$VERSION -X main.Commit=$COMMIT -X main.BuildDate=$BUILD_DATE" \
+            -o dist/cli-proxy-api ./cmd/server/
+          chmod 0755 dist/cli-proxy-api
+          sha256sum dist/cli-proxy-api > dist/cli-proxy-api.sha256
+          {
+            echo "version=$VERSION"
+            echo "commit=$COMMIT"
+            echo "built_at=$BUILD_DATE"
+            echo "runner=blacksmith-8vcpu-ubuntu-2404-arm"
+          } > dist/build-info.txt
+          dist/cli-proxy-api --help >/dev/null
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cli-proxy-api-linux-arm64
+          path: dist/*
+          retention-days: 30

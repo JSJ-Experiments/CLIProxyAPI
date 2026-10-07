@@ -1,0 +1,17 @@
+# CLIProxyAPI: built-in dashboard, APIs, SSE, and WebSocket upgrades.
+# Import this inside each public site block that should expose CLIProxyAPI.
+handle /cliproxy {
+	redir * /cliproxy/management.html 308
+}
+handle /cliproxy/ {
+	redir * /cliproxy/management.html 308
+}
+handle_path /cliproxy/* {
+	header X-Robots-Tag "noindex, nofollow, noarchive"
+	reverse_proxy 127.0.0.1:8317 {
+		# Flush streaming responses immediately. WebSocket upgrades are automatic.
+		flush_interval -1
+		# Avoid disconnecting established streams immediately on a Caddy reload.
+		stream_close_delay 5m
+	}
+}
