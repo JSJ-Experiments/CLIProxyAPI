@@ -27,3 +27,26 @@ func IsUpstreamWebsocketReplayRequired(err error) bool {
 	var replayErr *UpstreamWebsocketReplayRequiredError
 	return errors.As(err, &replayErr)
 }
+
+// UpstreamWebsocketReconnectError asks the downstream to reconnect with a full
+// transcript after an established upstream socket loses its credential. The
+// original failure stays unwrap-able so quota and retry-after accounting still
+// applies to the exhausted credential, not the entire account pool.
+// The server must not replay incremental input on another credential: upstream
+// response IDs and in-flight tool state are scoped to the original socket.
+type UpstreamWebsocketReconnectError struct{ cause error }
+
+func (e *UpstreamWebsocketReconnectError) Error() string { return e.cause.Error() }
+func (e *UpstreamWebsocketReconnectError) Unwrap() error { return e.cause }
+
+func NewUpstreamWebsocketReconnectError(cause error) error {
+	if cause == nil {
+		return nil
+	}
+	return &UpstreamWebsocketReconnectError{cause: cause}
+}
+
+func IsUpstreamWebsocketReconnect(err error) bool {
+	var reconnectErr *UpstreamWebsocketReconnectError
+	return errors.As(err, &reconnectErr)
+}

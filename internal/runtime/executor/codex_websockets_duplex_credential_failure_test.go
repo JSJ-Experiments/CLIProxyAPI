@@ -113,8 +113,11 @@ func TestCodexDuplexLaterCredentialFailure(t *testing.T) {
 							if errors.As(chunk.Err, &scoped) && scoped.IsRequestScoped() {
 								t.Error("credential failure became request-scoped")
 							}
-							if !payloadSeen {
-								t.Error("original failure not forwarded before terminal error")
+							if got, want := core.IsUpstreamWebsocketReconnect(chunk.Err), status != http.StatusForbidden; got != want {
+								t.Errorf("reconnect=%t, want %t", got, want)
+							}
+							if got, want := payloadSeen, status == http.StatusForbidden; got != want {
+								t.Errorf("raw credential failure forwarded=%t, want %t", got, want)
 							}
 							continue
 						}
@@ -126,7 +129,7 @@ func TestCodexDuplexLaterCredentialFailure(t *testing.T) {
 							payloadSeen = true
 						}
 					}
-					if !payloadSeen || !terminalSeen {
+					if payloadSeen != (status == http.StatusForbidden) || !terminalSeen {
 						t.Errorf("failure payload=%t terminal=%t", payloadSeen, terminalSeen)
 					}
 					current, _ := manager.GetByID(bad.ID)

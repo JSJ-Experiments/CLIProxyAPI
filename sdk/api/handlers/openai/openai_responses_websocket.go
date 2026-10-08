@@ -36,6 +36,7 @@ const (
 	wsTimelineBodyKey                     = "WEBSOCKET_TIMELINE_OVERRIDE"
 	wsCloseReasonMaxBytes                 = 123
 	wsHTTPReplayRequiredCloseReason       = "upstream requires HTTP replay"
+	wsAccountReconnectCloseReason         = "upstream credential unavailable; reconnect with full context"
 	responsesWebsocketUpstreamModeUnknown = ""
 	responsesWebsocketUpstreamModeWS      = "websocket"
 	responsesWebsocketUpstreamModeHTTP    = "http"
@@ -72,6 +73,12 @@ func websocketClosePayloadForUpstreamError(err error) (bool, []byte) {
 	}
 
 	errText := err.Error()
+	if cliproxyexecutor.IsUpstreamWebsocketReconnect(err) {
+		return true, websocket.FormatCloseMessage(
+			websocket.CloseServiceRestart,
+			truncateWebsocketCloseReason(wsAccountReconnectCloseReason, wsCloseReasonMaxBytes),
+		)
+	}
 	if cliproxyexecutor.IsUpstreamWebsocketReplayRequired(err) {
 		return true, websocket.FormatCloseMessage(
 			websocket.CloseServiceRestart,

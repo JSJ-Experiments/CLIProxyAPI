@@ -499,12 +499,22 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 				var status interface{ StatusCode() int }
 				if errors.As(credentialErr, &status) && (status.StatusCode() == http.StatusUnauthorized || status.StatusCode() == http.StatusForbidden || status.StatusCode() == http.StatusTooManyRequests) {
 					// Account health is independent of which queued request failed.
-					// The conductor records the original classification without replaying
-					// this already-started stream on another credential.
 					reporter.PublishFailure(ctx, credentialErr)
-					if send(cliproxyexecutor.StreamChunk{Payload: payload}) {
-						send(cliproxyexecutor.StreamChunk{Err: credentialErr})
+					if status.StatusCode() == http.StatusForbidden {
+						// Not every 403 is an exhausted credential (e.g. a policy
+						// rejection). Preserve its original event and error rather
+						// than forcing a pointless reconnect on another account.
+						if send(cliproxyexecutor.StreamChunk{Payload: payload}) {
+							send(cliproxyexecutor.StreamChunk{Err: credentialErr})
+						}
+						return
 					}
+					// A started duplex socket cannot change credentials: the downstream
+					// must reconnect and replay its full transcript on a new session.
+					// Do not forward the raw quota event first: Codex would display it
+					// as final even if another credential can serve the new session.
+					// Unwrapping retains the upstream cooldown/retry-after classification.
+					send(cliproxyexecutor.StreamChunk{Err: cliproxyexecutor.NewUpstreamWebsocketReconnectError(credentialErr)})
 					return
 				}
 			}

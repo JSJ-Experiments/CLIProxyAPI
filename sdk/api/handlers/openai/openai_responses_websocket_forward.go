@@ -84,6 +84,14 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 		case errMsg, ok := <-errs:
 			if !ok {
 				errs = nil
+				if data == nil && opts.duplexStream != nil && opts.duplexStream() {
+					_, errClose := writer.closeWithoutError()
+					cancel(nil)
+					if errClose != nil {
+						return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), nil, errClose
+					}
+					return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), nil, websocket.ErrCloseSent
+				}
 				continue
 			}
 			if errMsg == nil {
@@ -120,6 +128,13 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 		case chunk, ok := <-data:
 			if !ok {
 				if opts.duplexStream != nil && opts.duplexStream() {
+					if errs != nil {
+						// Error delivery is on a separate channel. Never turn an
+						// upstream credential failure into a silent close merely
+						// because the data channel closed first.
+						data = nil
+						continue
+					}
 					// A duplex stream ends with its socket, not an individual response.
 					// The data channel may close before select observes its final error.
 					_, errClose := writer.closeWithoutError()

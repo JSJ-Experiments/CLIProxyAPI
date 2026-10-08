@@ -191,6 +191,83 @@ func TestWebsocketReplayCloseRequiresTypedSignal(t *testing.T) {
 	}
 }
 
+func TestWebsocketAccountReconnectCloseRequiresTypedSignal(t *testing.T) {
+	quota := websocketPinnedFailoverStatusError{status: http.StatusTooManyRequests, msg: `{"error":{"type":"usage_limit_reached"}}`}
+	err := coreexecutor.NewUpstreamWebsocketReconnectError(quota)
+	matched, payload := websocketClosePayloadForUpstreamError(fmt.Errorf("wrapped: %w", err))
+	if !matched || len(payload) == 0 {
+		t.Fatalf("typed reconnect matched=%t payload_len=%d", matched, len(payload))
+	}
+	if got := int(payload[0])<<8 | int(payload[1]); got != websocket.CloseServiceRestart {
+		t.Fatalf("close code=%d, want %d", got, websocket.CloseServiceRestart)
+	}
+	if got := string(payload[2:]); got != wsAccountReconnectCloseReason {
+		t.Fatalf("reconnect reason=%q", got)
+	}
+	if matched, _ := websocketClosePayloadForUpstreamError(quota); matched {
+		t.Fatal("untyped 429 spoofed reconnect close")
+	}
+}
+
+func TestDuplexAccountReconnectWaitsForErrorAfterDataCloses(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	serverErr := make(chan error, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, errUpgrade := responsesWebsocketUpgrader.Upgrade(w, r, nil)
+		if errUpgrade != nil {
+			serverErr <- errUpgrade
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+		ctx.Request = r
+		h := NewOpenAIResponsesAPIHandler(handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil))
+		data := make(chan []byte, 2)
+		errs := make(chan *interfaces.ErrorMessage, 1)
+		data <- []byte(`{"type":"response.created","response":{"id":"first","output":[]}}`)
+		data <- []byte(`{"type":"response.completed","response":{"id":"first","output":[]}}`)
+		close(data) // Deliberately close data BEFORE the credential error is available.
+		go func() {
+			// The client acknowledges the completed response, so the error is
+			// known to be from a later turn, not a half-started first response.
+			_, _, _ = conn.ReadMessage()
+			quota := websocketPinnedFailoverStatusError{status: http.StatusTooManyRequests, msg: `{"error":{"type":"usage_limit_reached"}}`}
+			errs <- &interfaces.ErrorMessage{StatusCode: http.StatusTooManyRequests, Error: coreexecutor.NewUpstreamWebsocketReconnectError(quota)}
+			close(errs)
+		}()
+		_, _, _, failure, errForward := h.forwardResponsesWebsocket(ctx, newResponsesWebsocketWriter(conn), func(...interface{}) {}, data, errs, nil, "account-reconnect", responsesWebsocketForwardOptions{duplexStream: func() bool { return true }})
+		if failure == nil || failure.StatusCode != http.StatusTooManyRequests || !errors.Is(errForward, websocket.ErrCloseSent) {
+			serverErr <- fmt.Errorf("failure=%v forward=%v, want quota and close", failure, errForward)
+			return
+		}
+		serverErr <- nil
+	}))
+	defer server.Close()
+	conn, _, errDial := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), nil)
+	if errDial != nil {
+		t.Fatal(errDial)
+	}
+	defer func() { _ = conn.Close() }()
+	_ = conn.SetReadDeadline(time.Now().Add(8 * time.Second))
+	for _, want := range []string{"response.created", "response.completed"} {
+		_, payload, errRead := conn.ReadMessage()
+		if errRead != nil || gjson.GetBytes(payload, "type").String() != want {
+			t.Fatalf("received %s, err=%v, want %s", payload, errRead, want)
+		}
+	}
+	if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(`{"ack":true}`)); errWrite != nil {
+		t.Fatal(errWrite)
+	}
+	_, payload, errRead := conn.ReadMessage()
+	var closeErr *websocket.CloseError
+	if !errors.As(errRead, &closeErr) || closeErr.Code != websocket.CloseServiceRestart || closeErr.Text != wsAccountReconnectCloseReason {
+		t.Fatalf("got payload=%s error=%v, want clean 1012 reconnect without raw 429", payload, errRead)
+	}
+	if err := <-serverErr; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestResponsesWebsocketRequestRequiresCurrentUpstream(t *testing.T) {
 	cases := []struct {
 		name    string
