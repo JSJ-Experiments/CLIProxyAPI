@@ -71,6 +71,7 @@ func (m *Manager) StartAutoRefresh(parent context.Context, interval time.Duratio
 
 	loop.rebuild(time.Now())
 	go loop.run(ctx)
+	go m.runCodexQuotaRechecks(ctx)
 }
 
 // StopAutoRefresh cancels the background refresh loop, if running.

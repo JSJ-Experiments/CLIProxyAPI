@@ -530,6 +530,10 @@ upstream:
     # Delay before each transparent capacity retry. Accepts Go duration syntax or bare seconds.
     # Default: 1s. Set "0s" for immediate retries.
     capacity-retry-wait: "1s"
+    # Read-only background usage checks for exhausted Codex OAuth accounts.
+    # Default: 10m. Accepts Go durations (e.g. "5m"); "0" disables checks.
+    # A verified restoration clears only quota cooldowns, not independent errors.
+    quota-recheck-interval: "10m"
     # When true, enable opt-in compatibility for orphan Codex delegation outputs.
     # Converts orphan function_call_output items from codex_app/create_thread and
     # codex_app/send_message_to_thread (which lack a valid call_id or matching function_call)

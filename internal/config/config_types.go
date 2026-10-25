@@ -332,6 +332,9 @@ type CodexConfig struct {
 	UpstreamRequestCompression bool `yaml:"upstream-request-compression" json:"upstream-request-compression"`
 	// UpstreamRequestCompressionMinBytes defaults to 1024 when zero or negative.
 	UpstreamRequestCompressionMinBytes int `yaml:"upstream-request-compression-min-bytes,omitempty" json:"upstream-request-compression-min-bytes,omitempty"`
+	// QuotaRecheckInterval controls background quota checks for exhausted OAuth accounts.
+	// Empty uses 10m; 0 disables checks. A positive Go duration enables checks.
+	QuotaRecheckInterval string `yaml:"quota-recheck-interval,omitempty" json:"quota-recheck-interval,omitempty"`
 	// DisableCodexCloaking disables forcing the official Codex identity headers on HTTP/SSE and WebSocket requests.
 	DisableCodexCloaking bool `yaml:"disable-codex-cloaking" json:"disable-codex-cloaking"`
 	// StreamBootstrapBuffering holds back the frames that arrive before generation starts, none of
@@ -414,6 +417,16 @@ const DefaultCodexStreamBootstrapTimeout = 0
 const DefaultCodexCapacityRetryCount = 3
 
 const DefaultCodexCapacityRetryWait = time.Second
+
+// QuotaRecheckIntervalDuration returns the background quota recheck interval.
+func (c *CodexConfig) QuotaRecheckIntervalDuration() time.Duration {
+	if c != nil && strings.TrimSpace(c.QuotaRecheckInterval) != "" {
+		if interval, errParse := time.ParseDuration(strings.TrimSpace(c.QuotaRecheckInterval)); errParse == nil && interval >= 0 {
+			return interval
+		}
+	}
+	return 10 * time.Minute
+}
 
 const maxBootstrapTimeoutSeconds = int64(math.MaxInt64 / time.Second)
 
