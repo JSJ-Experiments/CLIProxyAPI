@@ -76,9 +76,14 @@ func TestManager_ForceRefreshAll(t *testing.T) {
 		Provider: "antigravity",
 		Metadata: map[string]any{"access_token": "no-refresh"},
 	}
+	disabledAuth := &Auth{
+		ID: "ag-disabled", Provider: "antigravity", Disabled: true, Status: StatusDisabled,
+		Metadata: map[string]any{"refresh_token": "ref-disabled"},
+	}
 	_, _ = manager.Register(ctx, auth1)
 	_, _ = manager.Register(ctx, auth2)
 	_, _ = manager.Register(ctx, auth3NoRef)
+	_, _ = manager.Register(ctx, disabledAuth)
 
 	results := manager.ForceRefreshAll(ctx)
 	if len(results) != 2 {

@@ -359,6 +359,12 @@ type CodexConfig struct {
 	// When set (e.g. "20s"), the stream is released once the time ceiling is reached, avoiding
 	// reverse-proxy timeouts (e.g. Nginx 60s proxy_read_timeout).
 	StreamBootstrapTimeout string `yaml:"stream-bootstrap-timeout,omitempty" json:"stream-bootstrap-timeout,omitempty"`
+	// CapacityRetryCount controls how many times a still-buffered full-duplex response.create
+	// may be retried after an upstream model-capacity/overload rejection. Nil uses the default.
+	CapacityRetryCount *int `yaml:"capacity-retry-count,omitempty" json:"capacity-retry-count,omitempty"`
+	// CapacityRetryWait is the delay before each capacity retry. It accepts Go duration syntax
+	// (for example "750ms" or "2s") or a bare non-negative integer interpreted as seconds.
+	CapacityRetryWait string `yaml:"capacity-retry-wait,omitempty" json:"capacity-retry-wait,omitempty"`
 	// OrphanDelegationCompatibility enables opt-in compatibility for orphan Codex delegation outputs.
 	OrphanDelegationCompatibility bool `yaml:"orphan-delegation-compatibility" json:"orphan-delegation-compatibility"`
 	// ModelLevelCooling scopes Codex usage_limit_reached quota cooldowns to the requested model
@@ -405,6 +411,10 @@ func (c CodexConfig) EffectiveSignInWithChatGPTIdentifier() string {
 // By default, it is 0 (unlimited time, relying purely on the 48-frame and 1MB byte bounds).
 const DefaultCodexStreamBootstrapTimeout = 0
 
+const DefaultCodexCapacityRetryCount = 3
+
+const DefaultCodexCapacityRetryWait = time.Second
+
 const maxBootstrapTimeoutSeconds = int64(math.MaxInt64 / time.Second)
 
 // StreamBootstrapTimeoutDuration returns the maximum duration to buffer bootstrap events.
@@ -429,6 +439,35 @@ func (c *CodexConfig) StreamBootstrapTimeoutDuration() time.Duration {
 		}
 	}
 	return DefaultCodexStreamBootstrapTimeout
+}
+
+// CapacityRetryCountValue returns the configured number of retries after the original attempt.
+func (c *CodexConfig) CapacityRetryCountValue() int {
+	if c == nil || c.CapacityRetryCount == nil {
+		return DefaultCodexCapacityRetryCount
+	}
+	if *c.CapacityRetryCount < 0 {
+		return 0
+	}
+	return *c.CapacityRetryCount
+}
+
+// CapacityRetryWaitDuration returns the fixed delay before each retry.
+func (c *CodexConfig) CapacityRetryWaitDuration() time.Duration {
+	if c == nil {
+		return DefaultCodexCapacityRetryWait
+	}
+	raw := strings.TrimSpace(c.CapacityRetryWait)
+	if raw == "" {
+		return DefaultCodexCapacityRetryWait
+	}
+	if d, err := time.ParseDuration(raw); err == nil && d >= 0 {
+		return d
+	}
+	if secs, err := strconv.Atoi(raw); err == nil && secs >= 0 && int64(secs) <= maxBootstrapTimeoutSeconds {
+		return time.Duration(secs) * time.Second
+	}
+	return DefaultCodexCapacityRetryWait
 }
 
 // CodexLiveMediaRelayConfig configures the in-process Codex Live WebRTC gateway.

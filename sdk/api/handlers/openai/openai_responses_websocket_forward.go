@@ -252,7 +252,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 					completed = false
 					turnEnded = false
 					if opts.localInterrupt != nil {
-						opts.localInterrupt.reactivate()
+						opts.localInterrupt.reactivate(ojson.GetBytesNoCopy(payloads[i], "response.id").String())
 					}
 					outputItemsByIndex = make(map[int64][]byte)
 					outputItemsFallback = nil
@@ -380,6 +380,9 @@ func completeResponsesWebsocketLocalInterrupt(
 		cancel(errSet)
 		return output, responseID, sortedStringSet(pendingToolCallIDs), nil, errSet
 	}
+	// Cancel the upstream before acknowledging interruption downstream. A fast
+	// WebSocket client may start a follow-up immediately after response.incomplete;
+	// the interrupted upstream must no longer be active at that point.
 	cancel(context.Canceled)
 	if errWrite := writeResponsesWebsocketPayload(writer, wsTimelineLog, incompleteDoc.Bytes(), time.Now()); errWrite != nil {
 		return output, responseID, sortedStringSet(pendingToolCallIDs), nil, errWrite

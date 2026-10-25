@@ -9,11 +9,14 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/ojson"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtimeevents"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -21,6 +24,17 @@ import (
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
 )
+
+// codexDuplexCapacityRejectionCount is process-lifetime observability for transient
+// model-capacity/overload responses. Request logs remain the durable per-attempt record.
+var codexDuplexCapacityRejectionCount atomic.Uint64
+
+type codexDuplexCapacityRetry struct {
+	prepared *codexWebsocketPrepared
+	attempt  int
+	limit    int
+	wait     time.Duration
+}
 
 // codexDuplexConnectionError keeps a connection failure from cooling the shared
 // credential. The socket still fails visibly; no reconnect or replay is attempted.
@@ -34,8 +48,9 @@ func (e *codexDuplexConnectionError) IsRequestScoped() bool { return true }
 // streamCodexDuplex owns the already authenticated socket until downstream
 // disconnect. A response terminal event is not a connection terminal event:
 // accepted steering may produce a successor or wait for client tool results.
-// There is no redial, credential selection, local acknowledgement, or replay
-// in this path. Only the upstream can take ownership of a steering submission.
+// There is no redial or credential selection in this path. With bootstrap buffering enabled,
+// an explicit response.create that is rejected for transient capacity before any meaningful
+// output escapes may be replayed on the same socket. Steering submissions are never replayed.
 func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 	ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options,
 	sess *codexWebsocketSession, conn *websocket.Conn, readCh chan codexWebsocketRead,
@@ -63,6 +78,7 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 		preserveClassification bool
 	}
 	writeErrors := make(chan writerFailure, 1)
+	retryCreates := make(chan codexDuplexCapacityRetry, 1)
 	// Explicit creates have their own request settings. Automatic successors
 	// inherit the preceding response settings, just as they do upstream.
 	var metadataMu sync.Mutex
@@ -119,6 +135,7 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 	}
 	waitingParent := ""
 	automaticActive := false
+	capacityRetryInFlight := false
 	stateChanged := make(chan struct{}, 1)
 	wakeWriter := func() {
 		select {
@@ -152,7 +169,7 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 	readyForCreate := func() bool {
 		metadataMu.Lock()
 		defer metadataMu.Unlock()
-		if len(unacknowledgedSteers) > 0 || automaticActive {
+		if len(unacknowledgedSteers) > 0 || automaticActive || capacityRetryInFlight {
 			return false
 		}
 		for _, accepted := range acceptedSteers {
@@ -649,6 +666,36 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 			select {
 			case <-streamCtx.Done():
 				return
+			case retry := <-retryCreates:
+				prepared := retry.prepared
+				if prepared == nil {
+					continue
+				}
+				if retry.wait > 0 {
+					timer := time.NewTimer(retry.wait)
+					select {
+					case <-streamCtx.Done():
+						if !timer.Stop() {
+							<-timer.C
+						}
+						return
+					case <-timer.C:
+					}
+				}
+				payload := frameCodexWebsocketRequestBody(prepared.clientBody)
+				helps.RecordAPIWebsocketRequest(streamCtx, e.cfg, helps.UpstreamRequestLog{
+					URL: initial.wsURL, Method: "WEBSOCKET", Body: payload, Provider: e.Identifier(), AuthID: auth.ID,
+				})
+				if errWrite := writeCodexWebsocketMessage(sess, conn, payload); errWrite != nil {
+					fail(mapCodexWebsocketWriteError(sess, conn, errWrite))
+					return
+				}
+				metadataMu.Lock()
+				capacityRetryInFlight = false
+				metadataMu.Unlock()
+				wakeWriter()
+				log.Infof("codex websockets: capacity retry forwarded session=%s auth=%s url=%s event=response.create retry=%d retry_limit=%d wait=%s", sess.sessionID, auth.ID, initial.wsURL, retry.attempt, retry.limit, retry.wait)
+				continue
 			case <-stateChanged:
 				if !flushPendingCreates() {
 					return
@@ -819,6 +866,31 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 		var outputFallback [][]byte
 		// A business rejection followed by EOF with nothing outstanding stays terminal.
 		terminalBusinessRejection := false
+		var heldTurnPayloads [][]byte
+		heldTurnBytes := 0
+		heldTurnOpen := false
+		var heldTurnPrepared *codexWebsocketPrepared
+		capacityRetries := make(map[*codexWebsocketPrepared]int)
+		countedCapacityResponses := make(map[string]uint64)
+		suppressedCapacityFailures := make(map[string]struct{})
+		flushHeldTurn := func() bool {
+			for _, held := range heldTurnPayloads {
+				if !send(cliproxyexecutor.StreamChunk{Payload: held}) {
+					return false
+				}
+			}
+			heldTurnPayloads = nil
+			heldTurnBytes = 0
+			heldTurnOpen = false
+			heldTurnPrepared = nil
+			return true
+		}
+		resetHeldTurn := func() {
+			heldTurnPayloads = nil
+			heldTurnBytes = 0
+			heldTurnOpen = false
+			heldTurnPrepared = nil
+		}
 		for {
 			kind, payload, errRead := readCodexWebsocketMessage(streamCtx, sess, conn, readCh)
 			if errRead != nil {
@@ -982,6 +1054,12 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 				}
 				outputItems = make(map[int64][]byte)
 				outputFallback = nil
+				if e.cfg != nil && e.cfg.Codex.StreamBootstrapBuffering && current != nil && len(current.originalPayload) > 0 {
+					heldTurnPayloads = nil
+					heldTurnBytes = 0
+					heldTurnOpen = true
+					heldTurnPrepared = current
+				}
 			}
 			observeCodexTokenEvent(reporter, payload)
 			helps.AppendCodexAPIWebsocketResponse(ctx, e.cfg, payload)
@@ -1026,6 +1104,16 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 				}
 				continue
 			}
+			if eventType == "response.failed" {
+				failedID := ojson.GetBytesNoCopy(payload, "response.id").String()
+				if failedID == "" {
+					failedID = ojson.GetBytesNoCopy(payload, "response_id").String()
+				}
+				if _, suppressed := suppressedCapacityFailures[failedID]; suppressed && failedID != "" {
+					delete(suppressedCapacityFailures, failedID)
+					continue
+				}
+			}
 			metadataMu.Lock()
 			isInitialResponse := firstResponse
 			metadataMu.Unlock()
@@ -1059,12 +1147,16 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 				}
 			}
 			eventPrepared, eventReporter := current, reporter
+			failureID := ""
+			var failureWasActive bool
 			if !isInitialResponse && (eventType == "response.failed" || eventType == "error") {
 				failedID := ojson.GetBytesNoCopy(payload, "response.id").String()
 				if failedID == "" {
 					failedID = ojson.GetBytesNoCopy(payload, "response_id").String()
 				}
+				failureID = failedID
 				metadataMu.Lock()
+				failureWasActive = responseActive
 				// A failure for the running response must not consume a queued create.
 				// A rejection before response.created instead owns the oldest pending
 				// create, including its reasoning replay scope.
@@ -1096,9 +1188,82 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 			}
 			restoreMultiAgent := !eventPrepared.multiAgentV2Conflict && (eventPrepared.optimizeMultiAgentV2 || sess.isMultiAgentV2Optimized(conn))
 			payload = helps.RestoreCodexMultiAgentV2Response(payload, restoreMultiAgent)
-			// Parse and invalidate replay for every rejected request, using the
-			// metadata that belongs to this event. Only the first rejection can
-			// enter conductor bootstrap retry; later failures stay on this socket.
+			if !isInitialResponse && (eventType == "error" || eventType == "response.failed") && isCodexCapacityOrOverloadFailure(payload) {
+				countKey := failureID
+				if countKey == "" && failureWasActive {
+					countKey = responseID
+				}
+				occurrenceCount, counted := countedCapacityResponses[countKey]
+				if !counted || countKey == "" {
+					occurrenceCount = codexDuplexCapacityRejectionCount.Add(1)
+					if countKey != "" {
+						countedCapacityResponses[countKey] = occurrenceCount
+					}
+					log.WithFields(log.Fields{
+						"session":          sess.sessionID,
+						"auth":             auth.ID,
+						"model":            req.Model,
+						"response":         countKey,
+						"occurrence_count": occurrenceCount,
+						"auto_retry":       e.cfg != nil && e.cfg.Codex.StreamBootstrapBuffering,
+					}).Warn("codex websockets: transient model capacity/overload rejection")
+				}
+				if capacityErr, _, ok := codexTerminalFailureErrWithCooling(payload, e.modelLevelCooling()); ok {
+					helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_capacity", capacityErr)
+				}
+
+				retryLimit := 0
+				retryWait := time.Duration(0)
+				if e.cfg != nil {
+					retryLimit = e.cfg.Codex.CapacityRetryCountValue()
+					retryWait = e.cfg.Codex.CapacityRetryWaitDuration()
+				}
+				canRetry := e.cfg != nil && e.cfg.Codex.StreamBootstrapBuffering &&
+					heldTurnOpen && heldTurnPrepared == eventPrepared && eventPrepared != nil &&
+					len(eventPrepared.originalPayload) > 0 && capacityRetries[eventPrepared] < retryLimit
+				if canRetry {
+					metadataMu.Lock()
+					canRetry = len(pending) == 0 && len(unacknowledgedSteers) == 0 && len(acceptedSteers) == 0 && !automaticActive && !capacityRetryInFlight
+					if canRetry {
+						pending = append(pending, eventPrepared)
+						capacityRetryInFlight = true
+						capacityRetries[eventPrepared]++
+					}
+					metadataMu.Unlock()
+				}
+				if canRetry {
+					attempt := capacityRetries[eventPrepared]
+					if countKey != "" {
+						suppressedCapacityFailures[countKey] = struct{}{}
+					}
+					resetHeldTurn()
+					log.WithFields(log.Fields{
+						"session": sess.sessionID, "auth": auth.ID, "model": req.Model,
+						"retry": attempt, "retry_limit": retryLimit, "retry_wait": retryWait,
+					}).Warn("codex websockets: retrying transient capacity rejection")
+					runtimeevents.Publish(runtimeevents.Event{
+						Type: "codex.capacity", Status: "retrying", Provider: e.Identifier(),
+						Model: req.Model, Session: sess.sessionID, Response: countKey,
+						OccurrenceCount: occurrenceCount, RetryAttempt: attempt, RetryLimit: retryLimit,
+						WaitMS: retryWait.Milliseconds(),
+					})
+					select {
+					case retryCreates <- codexDuplexCapacityRetry{prepared: eventPrepared, attempt: attempt, limit: retryLimit, wait: retryWait}:
+						continue
+					case <-streamCtx.Done():
+						return
+					}
+				}
+				runtimeevents.Publish(runtimeevents.Event{
+					Type: "codex.capacity", Status: "not_retried", Provider: e.Identifier(),
+					Model: req.Model, Session: sess.sessionID, Response: countKey,
+					OccurrenceCount: occurrenceCount, RetryAttempt: capacityRetries[eventPrepared], RetryLimit: retryLimit,
+					WaitMS: retryWait.Milliseconds(),
+				})
+			}
+			// Parse and invalidate reasoning replay for every rejected request, using the
+			// metadata that belongs to this event. Capacity retries above are the only
+			// full-duplex request replay and are limited to still-buffered explicit creates.
 			var terminalErr, replayErr error
 			if wsErr, ok := parseCodexWebsocketErrorWithCooling(payload, e.modelLevelCooling()); ok {
 				terminalErr = wsErr
@@ -1170,8 +1335,34 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 				if e.duplexStateObserver != nil {
 					e.duplexStateObserver("terminal_pending", false)
 				}
+				if retryCount := capacityRetries[current]; retryCount > 0 && eventType != "response.incomplete" {
+					retryLimit := 0
+					if e.cfg != nil {
+						retryLimit = e.cfg.Codex.CapacityRetryCountValue()
+					}
+					runtimeevents.Publish(runtimeevents.Event{
+						Type: "codex.capacity", Status: "recovered", Provider: e.Identifier(),
+						Model: req.Model, Session: sess.sessionID, Response: responseID,
+						RetryAttempt: retryCount, RetryLimit: retryLimit,
+					})
+				}
+				delete(capacityRetries, current)
 			}
-			if !send(cliproxyexecutor.StreamChunk{Payload: helps.EnsureResponsesUsageDetails(payload), Incomplete: eventType == "response.incomplete"}) {
+			downstreamPayload := helps.EnsureResponsesUsageDetails(payload)
+			if heldTurnOpen {
+				if isCodexBootstrapBufferableEvent(eventType, payload) && len(heldTurnPayloads) < codexBootstrapMaxBufferedFrames && heldTurnBytes+len(downstreamPayload) <= codexBootstrapMaxBufferedBytes {
+					heldTurnPayloads = append(heldTurnPayloads, downstreamPayload)
+					heldTurnBytes += len(downstreamPayload)
+					if establishing {
+						close(inputReady)
+					}
+					continue
+				}
+				if !flushHeldTurn() {
+					return
+				}
+			}
+			if !send(cliproxyexecutor.StreamChunk{Payload: downstreamPayload, Incomplete: eventType == "response.incomplete"}) {
 				return
 			}
 			if isCodexTerminalEventType(eventType) {

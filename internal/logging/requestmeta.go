@@ -14,6 +14,8 @@ type clientRequestMetadataKey struct{}
 
 // ClientRequestMetadata stores immutable downstream request metadata for asynchronous consumers.
 type ClientRequestMetadata struct {
+	// ClientKeyScope is a non-reversible SHA-256 caller identity, never the raw API key.
+	ClientKeyScope   string
 	ClientIP         string
 	ResolvedClientIP string
 	XForwardedFor    string

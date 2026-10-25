@@ -11,7 +11,8 @@ import (
 func TestResponsesLocalInterruptRetainsClaimedFrameAfterEnd(t *testing.T) {
 	local := newResponsesLocalInterrupt()
 	local.begin(false)
-	if !local.deliver([]byte(`{"type":"response.interrupt","response_id":"unknown"}`)) {
+	local.reactivate("r1")
+	if !local.deliver([]byte(`{"type":"response.interrupt","response_id":"r1"}`)) {
 		t.Fatal("frame was not claimed while active")
 	}
 	local.deactivate()
@@ -21,7 +22,7 @@ func TestResponsesLocalInterruptRetainsClaimedFrameAfterEnd(t *testing.T) {
 	}
 	select {
 	case frame := <-local.framesChan():
-		if got := string(frame); got != `{"type":"response.interrupt","response_id":"unknown"}` {
+		if got := string(frame); got != `{"type":"response.interrupt","response_id":"r1"}` {
 			t.Fatalf("retained frame = %s", got)
 		}
 	default:
@@ -41,14 +42,15 @@ func TestResponsesLocalInterruptRetainsClaimedFrameAfterEnd(t *testing.T) {
 func TestResponsesLocalInterruptRejectsWhenQueueFull(t *testing.T) {
 	local := newResponsesLocalInterrupt()
 	local.begin(false)
-	if !local.deliver([]byte(`{"type":"response.interrupt","response_id":"first"}`)) {
+	local.reactivate("r1")
+	if !local.deliver([]byte(`{"type":"response.interrupt","response_id":"r1"}`)) {
 		t.Fatal("first frame was not claimed")
 	}
-	if local.deliver([]byte(`{"type":"response.interrupt","response_id":"second"}`)) {
+	if local.deliver([]byte(`{"type":"response.interrupt","response_id":"r1"}`)) {
 		t.Fatal("second frame claimed while queue was full")
 	}
 	frame := local.takeClaimed()
-	if got := string(frame); got != `{"type":"response.interrupt","response_id":"first"}` {
+	if got := string(frame); got != `{"type":"response.interrupt","response_id":"r1"}` {
 		t.Fatalf("claimed frame = %s", got)
 	}
 	if frame := local.takeClaimed(); frame != nil {
@@ -64,11 +66,13 @@ func TestResponsesLocalInterruptRejectsWhenQueueFull(t *testing.T) {
 func TestResponsesLocalInterruptWebsocketOwnershipIsAtomic(t *testing.T) {
 	local := newResponsesLocalInterrupt()
 	local.begin(true)
+	local.reactivate("r1")
 	if local.deliver([]byte(`{"type":"response.interrupt","response_id":"r1"}`)) {
 		t.Fatal("frame claimed for a websocket-owned turn")
 	}
 	local.endWebsocketTurn()
 	local.begin(false)
+	local.reactivate("r1")
 	if !local.deliver([]byte(`{"type":"response.interrupt","response_id":"r1"}`)) {
 		t.Fatal("frame not claimed for an HTTP turn")
 	}

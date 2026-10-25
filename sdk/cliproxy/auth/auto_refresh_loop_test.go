@@ -49,7 +49,7 @@ func TestNextRefreshCheckAt_DisabledWithInvalidGrantUnschedule(t *testing.T) {
 		return &d
 	})
 
-	// Case 1: Normal disabled credential WITHOUT invalid_grant is scheduled for token refresh (expected behavior)
+	// Case 1: Normal disabled credentials are not refreshed automatically.
 	normalDisabledAuth := &Auth{
 		ID:       "normal-disabled",
 		Provider: "disabled-schedule",
@@ -60,13 +60,8 @@ func TestNextRefreshCheckAt_DisabledWithInvalidGrantUnschedule(t *testing.T) {
 			"expires_at": expiry.Format(time.RFC3339),
 		},
 	}
-	got, ok := nextRefreshCheckAt(now, normalDisabledAuth, 15*time.Minute)
-	if !ok {
-		t.Fatalf("nextRefreshCheckAt() ok = false, want true for normal disabled auth")
-	}
-	want := expiry.Add(-lead)
-	if !got.Equal(want) {
-		t.Fatalf("nextRefreshCheckAt() = %s, want %s", got, want)
+	if _, ok := nextRefreshCheckAt(now, normalDisabledAuth, 15*time.Minute); ok {
+		t.Fatal("nextRefreshCheckAt() scheduled a disabled credential")
 	}
 
 	// Case 2: Disabled credential WITH invalid_grant is permanently unscheduled (never refreshed)

@@ -544,6 +544,23 @@ func isCodexModelCapacityError(errorBody []byte) bool {
 	return false
 }
 
+// isCodexCapacityOrOverloadFailure reports transient capacity failures that may be
+// replayed while a response turn is still entirely buffered from the downstream.
+func isCodexCapacityOrOverloadFailure(eventData []byte) bool {
+	body := eventData
+	if terminalBody, ok := codexTerminalFailureBody(eventData); ok {
+		body = terminalBody
+	}
+	if isCodexModelCapacityError(body) {
+		return true
+	}
+	errorType := strings.ToLower(strings.TrimSpace(ojson.GetBytesNoCopy(body, "error.type").String()))
+	errorCode := strings.ToLower(strings.TrimSpace(ojson.GetBytesNoCopy(body, "error.code").String()))
+	errorMessage := strings.ToLower(strings.TrimSpace(ojson.GetBytesNoCopy(body, "error.message").String()))
+	return errorCode == "server_is_overloaded" ||
+		(errorType == "service_unavailable_error" && strings.Contains(errorMessage, "overload"))
+}
+
 // isCodexUsageLimitError reports whether the error body represents a Codex
 // quota/plan-limit exhaustion (error.type == "usage_limit_reached"). This is the
 // signal Codex emits when a credential's usage quota is depleted, and it carries

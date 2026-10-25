@@ -412,6 +412,10 @@ func nextRefreshCheckAt(now time.Time, auth *Auth, interval time.Duration) (time
 	if auth == nil {
 		return time.Time{}, false
 	}
+	// Disabled credentials must only refresh on an explicit single-account request.
+	if auth.Disabled || auth.Status == StatusDisabled {
+		return time.Time{}, false
+	}
 	if hasUnauthorizedAuthFailure(auth) || hasDisabledInvalidGrantFailure(auth) {
 		return time.Time{}, false
 	}

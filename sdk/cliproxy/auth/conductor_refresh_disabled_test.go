@@ -57,13 +57,13 @@ type oauthStatusError struct {
 func (e oauthStatusError) Error() string   { return fmt.Sprintf("status %d: %s", e.code, e.msg) }
 func (e oauthStatusError) StatusCode() int { return e.code }
 
-func TestRefreshAuthForRequest_NormalDisabledAuth_RefreshesTokenSuccessfully(t *testing.T) {
+func TestRefreshAuthForRequest_NormalDisabledAuth_OnlyRefreshesOnExplicitRequest(t *testing.T) {
 	ctx := context.Background()
 	manager := NewManager(nil, &RoundRobinSelector{}, nil)
 	executor := &mockOAuthErrorExecutor{id: "test-provider"}
 	manager.RegisterExecutor(executor)
 
-	// Normal disabled auth without invalid_grant should refresh tokens normally (expected behavior)
+	// A disabled credential must be ignored by automatic refresh.
 	auth := &Auth{
 		ID:       "normal-disabled-auth",
 		Provider: "test-provider",
@@ -78,9 +78,18 @@ func TestRefreshAuthForRequest_NormalDisabledAuth_RefreshesTokenSuccessfully(t *
 		t.Fatalf("Register error: %v", err)
 	}
 
-	refreshed, errRefresh := manager.refreshAuthForRequest(ctx, auth.ID, "")
+	if _, errRefresh := manager.refreshAuthForRequest(ctx, auth.ID, ""); errRefresh == nil {
+		t.Fatal("automatic refresh should be blocked for disabled auth")
+	}
+	if executor.refreshCalls.Load() != 0 {
+		t.Fatalf("executor.Refresh called %d times without explicit refresh", executor.refreshCalls.Load())
+	}
+	refreshed, errRefresh := manager.ForceRefreshAuth(ctx, auth.ID)
 	if errRefresh != nil {
-		t.Fatalf("expected successful refresh for normal disabled auth, got error: %v", errRefresh)
+		t.Fatalf("expected successful explicit refresh, got error: %v", errRefresh)
+	}
+	if !refreshed.Disabled || refreshed.Status != StatusDisabled {
+		t.Fatalf("manual refresh re-enabled credential: disabled=%v status=%s", refreshed.Disabled, refreshed.Status)
 	}
 	if executor.refreshCalls.Load() != 1 {
 		t.Fatalf("executor.Refresh called %d times, want 1 for normal disabled auth", executor.refreshCalls.Load())
@@ -117,8 +126,8 @@ func TestRefreshAuthForRequest_DisabledAuth_InvalidGrant_NeverRetries(t *testing
 		t.Fatalf("Register error: %v", err)
 	}
 
-	// 1st call encounters invalid_grant
-	_, errRefresh := manager.refreshAuthForRequest(ctx, auth.ID, "")
+	// Explicit refresh encounters invalid_grant; automatic attempts remain blocked.
+	_, errRefresh := manager.ForceRefreshAuth(ctx, auth.ID)
 	if errRefresh == nil {
 		t.Fatalf("expected refresh error, got nil")
 	}

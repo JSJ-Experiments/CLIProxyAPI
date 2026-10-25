@@ -33,6 +33,7 @@ type responsesLocalInterrupt struct {
 	mu           sync.Mutex
 	active       bool
 	wsTurnActive bool
+	responseID   string
 	frames       chan []byte
 }
 
@@ -50,17 +51,19 @@ func (s *responsesLocalInterrupt) begin(websocketOwned bool) {
 	s.mu.Lock()
 	s.active = true
 	s.wsTurnActive = websocketOwned
+	s.responseID = ""
 	s.mu.Unlock()
 }
 
-// reactivate reopens claims for the next response on the same turn (duplex),
-// preserving the ownership recorded by begin.
-func (s *responsesLocalInterrupt) reactivate() {
+// reactivate records the running response ID and reopens claims, preserving
+// the ownership recorded by begin.
+func (s *responsesLocalInterrupt) reactivate(responseID string) {
 	if s == nil {
 		return
 	}
 	s.mu.Lock()
 	s.active = true
+	s.responseID = strings.TrimSpace(responseID)
 	s.mu.Unlock()
 }
 
@@ -82,6 +85,7 @@ func (s *responsesLocalInterrupt) stopClaims() {
 	}
 	s.mu.Lock()
 	s.active = false
+	s.responseID = ""
 	s.mu.Unlock()
 }
 
@@ -115,7 +119,8 @@ func (s *responsesLocalInterrupt) deliver(payload []byte) bool {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.active || s.wsTurnActive {
+	id := strings.TrimSpace(ojson.GetBytesNoCopy(payload, "response_id").String())
+	if !s.active || s.wsTurnActive || id == "" || id != s.responseID {
 		return false
 	}
 	select {

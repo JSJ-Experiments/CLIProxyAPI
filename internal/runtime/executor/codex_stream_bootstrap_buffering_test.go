@@ -26,6 +26,7 @@ const (
 	codexInvalidEvent       = `{"type":"error","error":{"type":"invalid_request_error","code":"invalid_value","message":"Invalid input."},"sequence_number":2}`
 	codexCreatedEvent       = `{"type":"response.created","response":{"id":"resp_1","model":"gpt-5.6-terra"}}`
 	codexInProgressEvent    = `{"type":"response.in_progress","response":{"id":"resp_1"}}`
+	codexModerationMetadata = `{"type":"response.metadata","sequence_number":2,"response_id":"resp_1","metadata":{"openai_chatgpt_moderation_metadata":{}}}`
 	codexOutputAddedEvent   = `{"type":"response.output_item.added","item":{"id":"msg_1","type":"message","role":"assistant","content":[]},"output_index":0}`
 	codexKeepaliveEvent     = `{"type":"keepalive","sequence_number":1}`
 	codexOutputDeltaEvent   = `{"type":"response.output_text.delta","item_id":"msg_1","output_index":0,"content_index":0,"delta":"hi"}`
@@ -133,6 +134,23 @@ func TestCodexExecutor_BootstrapBuffering_OverloadFailsAttemptWithoutLeakingHand
 	}
 	if got := statusCodeFromTestError(t, err); got != http.StatusServiceUnavailable {
 		t.Fatalf("status code = %d, want %d (upstream hides 503 behind HTTP 200)", got, http.StatusServiceUnavailable)
+	}
+}
+
+// Codex can emit response.metadata after the response preamble and before an
+// overload rejection. Moderation metadata is not generated content: it must not
+// commit the downstream HTTP stream and prevent a safe credential retry.
+func TestCodexExecutor_BootstrapBuffering_ModerationMetadataBeforeOverload(t *testing.T) {
+	server := codexSSEServer(codexCreatedEvent, codexInProgressEvent, codexModerationMetadata, codexOverloadEvent)
+	defer server.Close()
+
+	req, opts := codexTestRequest()
+	result, err := NewCodexExecutor(codexBufferingConfig(true)).ExecuteStream(context.Background(), codexTestAuth(server.URL), req, opts)
+	if err == nil || result != nil {
+		t.Fatalf("expected uncommitted overload retry, got result=%v error=%v", result != nil, err)
+	}
+	if got := statusCodeFromTestError(t, err); got != http.StatusServiceUnavailable {
+		t.Fatalf("status code = %d, want 503", got)
 	}
 }
 
@@ -902,6 +920,7 @@ func TestIsCodexBootstrapBufferableEvent(t *testing.T) {
 	hold := []string{
 		`{"type":"response.created"}`,
 		`{"type":"response.in_progress"}`,
+		`{"type":"response.metadata","sequence_number":2,"response_id":"resp_1","metadata":{"openai_chatgpt_moderation_metadata":{}}}`,
 		`{"type":"codex.rate_limits"}`,
 		`{"type":"codex.response.metadata"}`,
 		`{"type":"response.metadata","response_id":"resp_1","sequence_number":2,"metadata":{"openai_chatgpt_moderation_metadata":{"prompt":{}}}}`,
@@ -1151,6 +1170,20 @@ func TestCodexWebsocketsExecutor_BootstrapBuffering_PrivateHandshakeFramesDoNotE
 	}
 	if got := statusCodeFromTestError(t, err); got != http.StatusServiceUnavailable {
 		t.Fatalf("status code = %d, want %d", got, http.StatusServiceUnavailable)
+	}
+}
+
+func TestCodexWebsocketsExecutor_BootstrapBuffering_ModerationMetadataBeforeOverload(t *testing.T) {
+	server := codexWebsocketServer(t, codexCreatedEvent, codexInProgressEvent, codexModerationMetadata, codexOverloadEvent)
+	defer server.Close()
+
+	req, opts := codexWebsocketRequest()
+	result, err := NewCodexWebsocketsExecutor(codexBufferingConfig(true)).ExecuteStream(context.Background(), codexTestAuth(server.URL), req, opts)
+	if err == nil || result != nil {
+		t.Fatalf("expected uncommitted overload retry, got result=%v error=%v", result != nil, err)
+	}
+	if got := statusCodeFromTestError(t, err); got != http.StatusServiceUnavailable {
+		t.Fatalf("status code = %d, want 503", got)
 	}
 }
 
