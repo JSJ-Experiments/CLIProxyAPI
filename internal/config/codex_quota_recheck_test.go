@@ -27,12 +27,12 @@ func TestCodexQuotaRecheckInterval(t *testing.T) {
 
 func TestCodexQuotaRecheckV8RoundTrip(t *testing.T) {
 	for _, value := range []string{"0", "5m"} {
-		data := []byte("config-version: 8\nserver: {port: 8317}\nupstream:\n  codex:\n    quota-recheck-interval: \"" + value + "\"\n")
+		data := []byte("config-version: 8\nserver: {port: 8317}\nupstream:\n  codex:\n    wait-on-quota: true\n    quota-recheck-interval: \"" + value + "\"\n")
 		cfg, err := ParseConfigBytes(data)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if cfg.Codex.QuotaRecheckInterval != value {
+		if cfg.Codex.QuotaRecheckInterval != value || !cfg.Codex.WaitOnQuota {
 			t.Fatal("v8 interval not loaded")
 		}
 		path := filepath.Join(t.TempDir(), "config.yaml")
@@ -46,8 +46,18 @@ func TestCodexQuotaRecheckV8RoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if cfg.Codex.QuotaRecheckInterval != value {
+		if cfg.Codex.QuotaRecheckInterval != value || !cfg.Codex.WaitOnQuota {
 			t.Fatal("interval not preserved")
 		}
+	}
+}
+
+func TestCodexQuotaWaitKeepaliveConfig(t *testing.T) {
+	cfg, errParse := ParseConfigBytes([]byte("config-version: 8\nserver: {port: 8317}\nupstream:\n  codex:\n    wait-on-quota: true\n    quota-recheck-interval: 15s\nrequests:\n  streaming:\n    keepalive-seconds: 15\n    send-keepalive-before-ft: true\n  nonstream-keepalive-interval: 15\n"))
+	if errParse != nil {
+		t.Fatal(errParse)
+	}
+	if !cfg.Codex.WaitOnQuota || cfg.Streaming.KeepAliveSeconds != 15 || !cfg.Streaming.SendKeepAliveBeforeFT || cfg.NonStreamKeepAliveInterval != 15 {
+		t.Fatal("quota waiting requires v8 requests keepalive settings to reach the handlers")
 	}
 }

@@ -1142,6 +1142,12 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 					// Do not forward the raw quota event first: Codex would display it
 					// as final even if another credential can serve the new session.
 					// Unwrapping retains the upstream cooldown/retry-after classification.
+					// The writer starts at response.created, even if that event is still
+					// buffered. Publish the preamble so bootstrap cannot retry the initial
+					// request without steering/tool input already consumed by this socket.
+					if !flushHeldTurn() {
+						return
+					}
 					send(cliproxyexecutor.StreamChunk{Err: cliproxyexecutor.NewUpstreamWebsocketReconnectError(credentialErr)})
 					return
 				}

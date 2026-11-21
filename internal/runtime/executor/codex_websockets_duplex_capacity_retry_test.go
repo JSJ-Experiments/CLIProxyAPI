@@ -9,12 +9,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	auth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	core "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	translator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 func TestCodexDuplexCapacityRetryIsTransparent(t *testing.T) {
@@ -55,7 +55,7 @@ func TestCodexDuplexCapacityRetryIsTransparent(t *testing.T) {
 		if !ok {
 			return
 		}
-		if got := gjson.GetBytes(second, "prompt_cache_key").String(); got != "retry-me" {
+		if got := ojson.GetBytesNoCopy(second, "prompt_cache_key").String(); got != "retry-me" {
 			upstreamErr <- fmt.Errorf("second request prompt_cache_key = %q, want retry-me", got)
 			return
 		}
@@ -70,7 +70,7 @@ func TestCodexDuplexCapacityRetryIsTransparent(t *testing.T) {
 		if !ok {
 			return
 		}
-		if got := gjson.GetBytes(retried, "prompt_cache_key").String(); got != "retry-me" {
+		if got := ojson.GetBytesNoCopy(retried, "prompt_cache_key").String(); got != "retry-me" {
 			upstreamErr <- fmt.Errorf("retry prompt_cache_key = %q, want retry-me", got)
 			return
 		}
@@ -110,10 +110,10 @@ func TestCodexDuplexCapacityRetryIsTransparent(t *testing.T) {
 			t.Fatalf("transparent capacity retry leaked an error: %v", chunk.Err)
 		}
 		downstream = append(downstream, string(chunk.Payload))
-		if gjson.GetBytes(chunk.Payload, "type").String() == "response.completed" && gjson.GetBytes(chunk.Payload, "response.id").String() == "first" {
+		if ojson.GetBytesNoCopy(chunk.Payload, "type").String() == "response.completed" && ojson.GetBytesNoCopy(chunk.Payload, "response.id").String() == "first" {
 			input <- core.WebsocketInput{Payload: request("retry-me")}
 		}
-		if gjson.GetBytes(chunk.Payload, "type").String() == "response.completed" && gjson.GetBytes(chunk.Payload, "response.id").String() == "retried" {
+		if ojson.GetBytesNoCopy(chunk.Payload, "type").String() == "response.completed" && ojson.GetBytesNoCopy(chunk.Payload, "response.id").String() == "retried" {
 			cancel()
 		}
 	}

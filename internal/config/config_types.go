@@ -332,6 +332,9 @@ type CodexConfig struct {
 	UpstreamRequestCompression bool `yaml:"upstream-request-compression" json:"upstream-request-compression"`
 	// UpstreamRequestCompressionMinBytes defaults to 1024 when zero or negative.
 	UpstreamRequestCompressionMinBytes int `yaml:"upstream-request-compression-min-bytes,omitempty" json:"upstream-request-compression-min-bytes,omitempty"`
+	// WaitOnQuota keeps unstarted requests pending while eligible Codex credentials
+	// are quota-exhausted. Cancellation still stops waiting; Home routing is excluded.
+	WaitOnQuota bool `yaml:"wait-on-quota,omitempty" json:"wait-on-quota,omitempty"`
 	// QuotaRecheckInterval controls background quota checks for exhausted OAuth accounts.
 	// Empty uses 10m; 0 disables checks. A positive Go duration enables checks.
 	QuotaRecheckInterval string `yaml:"quota-recheck-interval,omitempty" json:"quota-recheck-interval,omitempty"`

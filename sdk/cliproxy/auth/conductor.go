@@ -212,7 +212,10 @@ type Manager struct {
 	auths              map[string]*Auth
 	authEpochs         map[string]uint64
 	authChangeWatchers map[string]map[chan struct{}]struct{}
-	scheduler          *authScheduler
+	// quotaAvailabilityChanged broadcasts completed credential/config publication
+	// to quota waiters. It is allocated lazily and protected by mu.
+	quotaAvailabilityChanged chan struct{}
+	scheduler                *authScheduler
 	// pluginScheduler runs outside m.mu before falling back to native selection.
 	pluginScheduler PluginScheduler
 	// continuityClock overrides time.Now and timer waiting in unit tests.

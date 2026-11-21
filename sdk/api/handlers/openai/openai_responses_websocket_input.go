@@ -63,7 +63,7 @@ func (s *responsesLocalInterrupt) reactivate(responseID string) {
 	}
 	s.mu.Lock()
 	s.active = true
-	s.responseID = strings.TrimSpace(responseID)
+	s.responseID = strings.Clone(strings.TrimSpace(responseID))
 	s.mu.Unlock()
 }
 

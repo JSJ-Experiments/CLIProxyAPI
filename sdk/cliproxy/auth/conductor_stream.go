@@ -266,6 +266,7 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 				if session := continuitySessionFromContext(ctx); session != nil {
 					session.setLastStreamProvider(provider)
 				}
+				chunk.Err = m.quotaStreamClientError(provider, routeModel, opts, chunk.Err)
 				if ctx == nil {
 					out <- chunk
 					return true

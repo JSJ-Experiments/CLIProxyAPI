@@ -173,6 +173,7 @@ func (m *Manager) UnregisterExecutor(provider string) {
 
 // Register inserts a new auth entry into the manager.
 func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
+	defer m.notifyQuotaAvailabilityChange()
 	if auth == nil {
 		return nil, nil
 	}
@@ -363,6 +364,7 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode upd
 // gate has been released, preserving the original update ordering in which
 // hooks and scheduler updates could re-enter manager operations.
 func (m *Manager) finishAuthUpdate(ctx context.Context, committed *Auth, persistCooldown bool) {
+	defer m.notifyQuotaAvailabilityChange()
 	if committed == nil {
 		return
 	}
@@ -787,6 +789,7 @@ func (m *Manager) Remove(ctx context.Context, id string) {
 // RemoveIf deletes an auth from runtime state while holding the per-auth
 // mutation gate when predicate is nil or returns true for the current auth.
 func (m *Manager) RemoveIf(ctx context.Context, id string, predicate func(*Auth) bool) bool {
+	defer m.notifyQuotaAvailabilityChange()
 	if m == nil {
 		return false
 	}
@@ -893,6 +896,7 @@ func (m *Manager) forgetWeightedAuthUpTo(authID string, maxEpoch, maxGen uint64)
 
 // Load resets manager state from the backing store.
 func (m *Manager) Load(ctx context.Context) error {
+	defer m.notifyQuotaAvailabilityChange()
 	// Exclude complete Save/publication transactions, including new registrations
 	// not yet present in auths. Never wait for this barrier while holding m.mu.
 	lockCtx := ctx

@@ -84,6 +84,11 @@ func (m *Manager) runCodexQuotaRechecks(ctx context.Context) {
 			if cadence < time.Second {
 				cadence = time.Second
 			}
+			if interval > 0 && m.codexQuotaWaitEnabled() {
+				// Scan cheaply for due probes while requests may be waiting. The
+				// configured interval still bounds actual upstream usage checks.
+				cadence = time.Second
+			}
 			timer.Reset(cadence)
 			seen := make(map[string]bool)
 			for _, a := range m.List() {
@@ -93,8 +98,11 @@ func (m *Manager) runCodexQuotaRechecks(ctx context.Context) {
 				seen[a.ID] = true
 				previous, exists := last[a.ID]
 				if !exists {
-					last[a.ID] = now
-					continue
+					previous = a.UpdatedAt
+					if previous.IsZero() || previous.After(now) {
+						previous = now
+					}
+					last[a.ID] = previous
 				}
 				if active[a.ID] || !codexQuotaRecheckDue(previous, now, interval) || len(active) >= cap(completed) {
 					continue
@@ -211,6 +219,7 @@ func (m *Manager) restoreCodexQuotaAfterRecheck(ctx context.Context, checked *Au
 	}
 	registry.GetGlobalRegistry().ApplyClientModelProjections(snapshot.ID, epoch, snapshot.Generation, projections)
 	m.persistCooldownStates(ctx)
+	m.notifyQuotaAvailabilityChange()
 	m.hook.OnAuthUpdated(ctx, snapshot)
 	return true
 }

@@ -256,7 +256,7 @@ func TestDuplexAccountReconnectWaitsForErrorAfterDataCloses(t *testing.T) {
 	_ = conn.SetReadDeadline(time.Now().Add(8 * time.Second))
 	for _, want := range []string{"response.created", "response.completed"} {
 		_, payload, errRead := conn.ReadMessage()
-		if errRead != nil || gjson.GetBytes(payload, "type").String() != want {
+		if errRead != nil || ojson.GetBytesNoCopy(payload, "type").String() != want {
 			t.Fatalf("received %s, err=%v, want %s", payload, errRead, want)
 		}
 	}

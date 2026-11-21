@@ -411,6 +411,14 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 		if continuitySession.terminated || continuitySession.budgetExhausted {
 			break
 		}
+		if retry, errWait := m.waitForCodexQuota(ctx, normalized, retryModel, opts, errExec); errWait != nil {
+			return cliproxyexecutor.Response{}, errWait
+		} else if retry {
+			attempt = -1
+			lastErr, preferredUpstreamErr = nil, nil
+			selectionCooldownDeadline = time.Time{}
+			continue
+		}
 		wait, shouldRetry := m.shouldRetryAfterErrorWithAttempted(ctx, opts, errExec, attempt, normalized, retryModel, maxWait, -1, defaultRequestRetry, roundAttempted)
 		if !shouldRetry {
 			break
@@ -495,7 +503,8 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 	var preferredUpstreamErr error
 	var selectionCooldownDeadline time.Time
 	retryModel := authSelectionModelFromOptions(opts, req.Model)
-	for attempt := 0; ; attempt++ {
+	attempt := 0
+	for {
 		roundAttempted := make(map[string]struct{})
 		roundOpts := withAttemptedAuthTracker(opts, roundAttempted)
 		resp, errExec := m.executeCountMixedOnce(ctx, normalized, req, roundOpts, maxRetryCredentials, attempt, defaultRequestRetry)
@@ -522,6 +531,14 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 			preferredUpstreamErr = errExec
 		}
 		lastErr = keepPreferredCandidateError(lastErr, errExec)
+		if retry, errWait := m.waitForCodexQuota(ctx, normalized, retryModel, opts, errExec); errWait != nil {
+			return cliproxyexecutor.Response{}, errWait
+		} else if retry {
+			attempt = 0
+			lastErr, preferredUpstreamErr = nil, nil
+			selectionCooldownDeadline = time.Time{}
+			continue
+		}
 		wait, shouldRetry := m.shouldRetryAfterErrorWithAttempted(ctx, opts, errExec, attempt, normalized, retryModel, maxWait, -1, defaultRequestRetry, roundAttempted)
 		if !shouldRetry {
 			break
@@ -529,6 +546,7 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 		if errWait := waitForCooldown(ctx, wait, maxWait); errWait != nil {
 			return cliproxyexecutor.Response{}, errWait
 		}
+		attempt++
 	}
 	if lastErr != nil {
 		if ctx != nil {
@@ -716,6 +734,14 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		}
 		if continuitySession.terminated || continuitySession.budgetExhausted {
 			break
+		}
+		if retry, errWait := m.waitForCodexQuota(ctx, normalized, retryModel, opts, errStream); errWait != nil {
+			return nil, errWait
+		} else if retry {
+			attempt = 0
+			lastErr, preferredUpstreamErr = nil, nil
+			selectionCooldownDeadline = time.Time{}
+			continue
 		}
 		wait, shouldRetry := m.shouldRetryAfterErrorWithAttempted(ctx, opts, errStream, attempt, normalized, retryModel, maxWait, homeRetryLimit, defaultRequestRetry, roundAttempted)
 		if !shouldRetry {

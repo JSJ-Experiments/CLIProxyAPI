@@ -162,6 +162,7 @@ func (m *Manager) SetConfigSnapshot(cfg *internalconfig.Config) bool {
 }
 
 func (m *Manager) setConfigSnapshotLocked(cfg *internalconfig.Config) bool {
+	defer m.notifyQuotaAvailabilityChange()
 	if cfg == nil {
 		cfg = &internalconfig.Config{}
 	} else {
@@ -1092,6 +1093,7 @@ func dedupeStrings(values []string) []string {
 
 // ResetQuota clears quota/cooldown state for an auth and resumes registry routing.
 func (m *Manager) ResetQuota(ctx context.Context, authID string) (*Auth, []string, error) {
+	defer m.notifyQuotaAvailabilityChange()
 	if m == nil {
 		return nil, nil, nil
 	}
@@ -2294,6 +2296,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	m.hook.OnResult(ctx, result)
 	m.publishErrorEvent(result, authSnapshot)
 	m.updateSessionAffinity(result)
+	m.notifyQuotaAvailabilityChange()
 }
 
 func (m *Manager) updateSessionAffinity(result Result) {

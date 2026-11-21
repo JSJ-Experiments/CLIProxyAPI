@@ -534,6 +534,12 @@ upstream:
     # Default: 10m. Accepts Go durations (e.g. "5m"); "0" disables checks.
     # A verified restoration clears only quota cooldowns, not independent errors.
     quota-recheck-interval: "10m"
+    # Keep unstarted requests pending instead of returning a terminal quota error.
+    # Wakes at the earliest reset or immediately on verified quota restoration.
+    # Enable requests.streaming keepalives for long-lived HTTP/SSE requests.
+    # Use quota-recheck-interval: "15s" to detect early restoration promptly.
+    # Does not replay partial responses or change Home-managed routing.
+    wait-on-quota: false
     # When true, enable opt-in compatibility for orphan Codex delegation outputs.
     # Converts orphan function_call_output items from codex_app/create_thread and
     # codex_app/send_message_to_thread (which lack a valid call_id or matching function_call)
