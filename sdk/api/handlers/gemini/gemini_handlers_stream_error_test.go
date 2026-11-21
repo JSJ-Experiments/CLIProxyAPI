@@ -175,3 +175,54 @@ func TestGeminiStreamGenerateContentSendKeepAliveBeforeFTWritesSSEErrorOnFailure
 		t.Fatalf("missing Gemini SSE JSON error event after keepalive: %q", body)
 	}
 }
+
+func TestGeminiStreamGenerateContentSkipsKeepAlivesForGoSDK(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	tickerCalls := 0
+	restore := handlers.SetStreamingKeepAliveTickerFactoryForTest(func(time.Duration) (<-chan time.Time, func()) {
+		tickerCalls++
+		ticks := make(chan time.Time, 1)
+		ticks <- time.Unix(1, 0)
+		return ticks, func() {}
+	})
+	defer restore()
+
+	const first = `{"candidates":[{"content":{"parts":[{"text":"first"}]}}]}`
+	const last = `{"candidates":[{"finishReason":"STOP"}]}`
+	chunks := make(chan coreexecutor.StreamChunk, 2)
+	chunks <- coreexecutor.StreamChunk{Payload: []byte(first)}
+	chunks <- coreexecutor.StreamChunk{Payload: []byte(last)}
+	close(chunks)
+
+	executor := &preFTKeepAliveGeminiExecutor{chunks: chunks}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	model := "go-sdk-keepalive-gemini-model"
+	auth := &coreauth.Auth{ID: t.Name(), Provider: executor.Identifier(), Status: coreauth.StatusActive}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{
+		Streaming: sdkconfig.StreamingConfig{KeepAliveSeconds: 15, SendKeepAliveBeforeFT: true},
+	}, manager)
+	router := gin.New()
+	router.POST("/v1beta/models/*action", NewGeminiAPIHandler(base).GeminiHandler)
+
+	request := httptest.NewRequest(http.MethodPost, "/v1beta/models/"+model+":streamGenerateContent?alt=sse", strings.NewReader(`{"contents":[{"parts":[{"text":"hi"}]}]}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("User-Agent", "google-genai-sdk/1.79.1 gl-go/go1.28")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+
+	want := "data: " + first + "\n\ndata: " + last + "\n\n"
+	if recorder.Code != http.StatusOK || recorder.Body.String() != want {
+		t.Errorf("status = %d, body = %q; want HTTP 200 and %q", recorder.Code, recorder.Body.String(), want)
+	}
+	if tickerCalls != 0 {
+		t.Errorf("started %d keep-alive tickers; want none before or after the first payload", tickerCalls)
+	}
+}

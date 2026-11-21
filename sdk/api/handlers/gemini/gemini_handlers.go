@@ -216,16 +216,17 @@ func (h *GeminiAPIHandler) handleStreamGenerateContent(c *gin.Context, modelName
 		handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 		committed = true
 	}
-	writeKeepAlive := func() bool {
-		commitHeaders()
-		_, _ = c.Writer.Write([]byte(": keep-alive\n\n"))
-		flusher.Flush()
-		return true
-	}
 	var keepAliveC <-chan time.Time
+	var writeKeepAlive func() bool
 	stopKeepAlive := func() {}
-	if alt == "" {
+	if geminiStreamSupportsKeepAlive(c, alt) {
 		keepAliveC, stopKeepAlive = handlers.NewPreFirstTokenKeepAliveTicker(h.CurrentConfig())
+		writeKeepAlive = func() bool {
+			commitHeaders()
+			_, _ = c.Writer.Write([]byte(": keep-alive\n\n"))
+			flusher.Flush()
+			return true
+		}
 	}
 	defer stopKeepAlive()
 
@@ -374,9 +375,14 @@ func (h *GeminiAPIHandler) handleGenerateContent(c *gin.Context, modelName strin
 	cliCancel()
 }
 
+func geminiStreamSupportsKeepAlive(c *gin.Context, alt string) bool {
+	// The Google Gen AI Go SDK used by Antigravity treats SSE comments as invalid chunks.
+	return alt == "" && !strings.HasPrefix(c.GetHeader("User-Agent"), "google-genai-sdk/")
+}
+
 func (h *GeminiAPIHandler) forwardGeminiStream(c *gin.Context, flusher http.Flusher, alt string, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage) {
 	var keepAliveInterval *time.Duration
-	if alt != "" {
+	if !geminiStreamSupportsKeepAlive(c, alt) {
 		keepAliveInterval = new(time.Duration(0))
 	}
 
