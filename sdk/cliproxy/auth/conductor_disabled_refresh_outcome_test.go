@@ -11,11 +11,15 @@ import (
 // Embed the executor stub for the unused request methods.
 type disabledRefreshOutcomeExecutor struct {
 	mockOAuthErrorExecutor
-	extendExpiry bool
+	extendExpiry  bool
+	duringRefresh func()
 }
 
 func (e *disabledRefreshOutcomeExecutor) Refresh(_ context.Context, a *Auth) (*Auth, error) {
 	e.refreshCalls.Add(1)
+	if e.duringRefresh != nil {
+		e.duringRefresh()
+	}
 	if e.extendExpiry {
 		// A provider can renew validity without rotating the credential strings.
 		a.Metadata["expires_at"] = time.Now().Add(24 * time.Hour).Format(time.RFC3339)
@@ -23,7 +27,7 @@ func (e *disabledRefreshOutcomeExecutor) Refresh(_ context.Context, a *Auth) (*A
 	return a, nil
 }
 
-func TestDisabledRefreshOutcomeJobCycle(t *testing.T) {
+func TestRefreshOutcomePreservedWhenDisabledDuringJob(t *testing.T) {
 	for _, disabledFlag := range []bool{true, false} {
 		for _, renew := range []bool{false, true} {
 			name := "status-disabled"
@@ -42,19 +46,16 @@ func TestDisabledRefreshOutcomeJobCycle(t *testing.T) {
 				m.RegisterExecutor(e)
 				setRefreshLeadFactory(t, e.id, func() *time.Duration { d := time.Minute; return &d })
 				oldRefresh := time.Now().Add(-48 * time.Hour)
-				a := &Auth{ID: name, Provider: e.id, Disabled: disabledFlag, Status: StatusDisabled,
+				a := &Auth{ID: name, Provider: e.id, Status: StatusActive,
 					LastRefreshedAt: oldRefresh, RefreshFailures: 3,
 					Metadata: map[string]any{"access_token": "unchanged", "expires_at": time.Now().Add(-time.Hour).Format(time.RFC3339)}}
-				if disabledFlag {
-					a.Status = StatusActive
-				}
 				registered, err := m.Register(ctx, a)
 				if err != nil {
 					t.Fatal(err)
 				}
 				now := time.Now()
 				if at, ok := nextRefreshCheckAt(now, registered, time.Minute); !ok || at.After(now) {
-					t.Fatalf("disabled auth must remain eligible for proactive refresh: %v, %v", at, ok)
+					t.Fatalf("active auth must be eligible for proactive refresh: %v, %v", at, ok)
 				}
 				job := m.markRefreshPending(nil, a.ID, registered.RegistrationEpoch, now)
 				if job == nil {
@@ -62,6 +63,17 @@ func TestDisabledRefreshOutcomeJobCycle(t *testing.T) {
 				}
 				if !m.beginRefreshJob(ctx, job) {
 					t.Fatal("refresh did not begin")
+				}
+				e.duringRefresh = func() {
+					disabled, _ := m.GetByID(a.ID)
+					if disabledFlag {
+						disabled.Disabled = true
+					} else {
+						disabled.Status = StatusDisabled
+					}
+					if _, errUpdate := m.Update(ctx, disabled); errUpdate != nil {
+						t.Fatal(errUpdate)
+					}
 				}
 				refreshed, err := m.refreshAuthForRequestAtEpoch(ctx, a.ID, "", job.registrationEpoch)
 				if err != nil {
@@ -97,8 +109,8 @@ func TestDisabledRefreshOutcomeJobCycle(t *testing.T) {
 					}
 				}
 				at, ok := nextRefreshCheckAt(current.LastRefreshedAt, current, time.Minute)
-				if !ok || !at.After(current.LastRefreshedAt) {
-					t.Fatalf("expected future proactive refresh, got %v, %v", at, ok)
+				if ok || !at.IsZero() {
+					t.Fatalf("disabled auth must not be rescheduled, got %v, %v", at, ok)
 				}
 			})
 		}

@@ -460,8 +460,10 @@ func TestDisabledCodexRejectedRefreshTokenDoesNotSpin(t *testing.T) {
 		t.Fatalf("Register error: %v", errReg)
 	}
 
-	// 1. First refresh attempt fails terminally; NextRefreshAfter must be deferred to exp (not 5m backoff).
-	m.refreshAuth(ctx, a.ID)
+	// 1. An explicit refresh attempt fails terminally; NextRefreshAfter must be deferred to exp (not 5m backoff).
+	if _, errRefresh := m.ForceRefreshAuth(ctx, a.ID); errRefresh == nil {
+		t.Fatal("expected explicit refresh to fail for a rejected token")
+	}
 	got, _ := m.GetByID(a.ID)
 	if got == nil {
 		t.Fatal("auth not found after refreshAuth")
@@ -501,7 +503,7 @@ func TestDisabledCodexRejectedRefreshTokenDoesNotSpin(t *testing.T) {
 		t.Fatalf("upstream RefreshCalls = %d, want 1", ex.RefreshCalls())
 	}
 
-	// 3. Even with NextRefreshAfter cleared, shouldRefresh must be false and nextRefreshCheckAt must defer to exp.
+	// 3. Even with NextRefreshAfter cleared, the disabled credential must not be scheduled.
 	m.mu.Lock()
 	m.auths[a.ID].NextRefreshAfter = time.Time{}
 	gen0 := m.auths[a.ID].Generation
@@ -515,8 +517,8 @@ func TestDisabledCodexRejectedRefreshTokenDoesNotSpin(t *testing.T) {
 	if shouldRef {
 		t.Fatal("shouldRefresh at now = true, want false for unchanged rejected refresh token with unexpired access token")
 	}
-	if !okNext || !nextAt.Equal(exp) {
-		t.Fatalf("nextRefreshCheckAt at now = (%v, %v), want (%v, true)", nextAt, okNext, exp)
+	if okNext || !nextAt.IsZero() {
+		t.Fatalf("nextRefreshCheckAt at now = (%v, %v), want unscheduled", nextAt, okNext)
 	}
 
 	loop := newAuthAutoRefreshLoop(m, refreshCheckInterval, 1)
@@ -562,7 +564,9 @@ func TestDisabledCodexRejectedRefreshTokenDoesNotSpin(t *testing.T) {
 	if _, errRegExp := m.Register(ctx, expiredDisabled); errRegExp != nil {
 		t.Fatalf("Register expiredDisabled error: %v", errRegExp)
 	}
-	m.refreshAuth(ctx, expiredDisabled.ID)
+	if _, errRefresh := m.ForceRefreshAuth(ctx, expiredDisabled.ID); errRefresh == nil {
+		t.Fatal("expected explicit refresh to fail for a rejected token")
+	}
 	gotExp, _ := m.GetByID(expiredDisabled.ID)
 	if gotExp.Status != StatusDisabled || !gotExp.NextRefreshAfter.IsZero() {
 		t.Fatalf("expired disabled terminal refresh: Status=%s NextRefreshAfter=%v, want StatusDisabled and zero time", gotExp.Status, gotExp.NextRefreshAfter)

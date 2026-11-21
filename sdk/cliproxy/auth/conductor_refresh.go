@@ -1337,22 +1337,7 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 	if auth == nil || exec == nil {
 		return nil, errors.New("auth or executor not found")
 	}
-	if (auth.Disabled || auth.Status == StatusDisabled) && !forceRefresh {
-		return nil, errors.New("auth is disabled; explicit refresh required")
-	}
-	if strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
-		if resolver, okResolver := store.(interface {
-			RefreshJournalFor(*Auth) (codex.RefreshJournal, error)
-		}); okResolver {
-			journal, errJournal := resolver.RefreshJournalFor(auth)
-			if errJournal != nil {
-				return nil, fmt.Errorf("resolve credential refresh journal: %w", errJournal)
-			}
-			ctx = codex.WithRefreshJournal(ctx, journal)
-		} else if journal, okJournal := store.(codex.RefreshJournal); okJournal {
-			ctx = codex.WithRefreshJournal(ctx, journal)
-		}
-	}
+	disabled := auth.Disabled || auth.Status == StatusDisabled
 	if registrationEpoch != 0 && auth.RegistrationEpoch != registrationEpoch {
 		return nil, errors.New("auth registration changed before refresh")
 	}
@@ -1364,7 +1349,7 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 	}
 
 	// Another request may already have refreshed this credential.
-	if failedAccessToken != "" {
+	if failedAccessToken != "" && (!disabled || forceRefresh) {
 		if !authMatchesTokenPartition(auth, failedAccessToken) && (authAccessToken(auth) != "" || authOuterAccessToken(auth) != "") {
 			return auth.Clone(), nil
 		}
@@ -1456,6 +1441,25 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 			return nil, auth.RefreshError
 		}
 		return nil, &Error{Code: "unauthorized", Message: "unauthorized (refresh token invalid)", HTTPStatus: http.StatusUnauthorized}
+	}
+
+	// Reconcile a known rejected grant above without contacting the provider, even
+	// if the account was disabled after its refresh job was queued.
+	if disabled && !forceRefresh {
+		return nil, errors.New("auth is disabled; explicit refresh required")
+	}
+	if strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		if resolver, okResolver := store.(interface {
+			RefreshJournalFor(*Auth) (codex.RefreshJournal, error)
+		}); okResolver {
+			journal, errJournal := resolver.RefreshJournalFor(auth)
+			if errJournal != nil {
+				return nil, fmt.Errorf("resolve credential refresh journal: %w", errJournal)
+			}
+			ctx = codex.WithRefreshJournal(ctx, journal)
+		} else if journal, okJournal := store.(codex.RefreshJournal); okJournal {
+			ctx = codex.WithRefreshJournal(ctx, journal)
+		}
 	}
 
 	base := auth.Clone()
